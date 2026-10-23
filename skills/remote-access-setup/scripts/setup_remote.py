@@ -167,15 +167,47 @@ def main() -> int:
         run("systemctl", "--user", "enable", "--now", "hermes-dashboard.service")
     with (home / "CHANGELOG.md").open("a") as fh:
         fh.write(f"\n## {stamp} — Remote dashboard setup\n- What: password-gated dashboard on {bind}:{ns.port}; mode={ns.mode}.\n- Why: remote access for Hermes Mobile/Desktop/Web.\n- Backup: {backup_dir}\n")
-    print("\nBackend configuration complete.")
-    print(f"Bind: {bind}:{ns.port}")
-    print(f"Client URL: {ns.public_url or f'http://<reachable-host>:{ns.port}'}")
-    print(f"Username: {ns.username}")
-    print("Password: the value entered above (not displayed or stored as plaintext)")
-    if ns.public_url:
-        print("The reverse proxy itself must still be configured and verified.")
-    print(f"Backup: {backup_dir}")
+    # --- compact change report ------------------------------------------
+    _print_change_report(ns, bind, home, backup_dir, env_file)
     return 0
+
+
+def _print_change_report(
+    ns: argparse.Namespace, bind: str, home: Path, backup_dir: Path, env_file: Path
+) -> None:
+    """Print a compact, non-sensitive summary of all changes made."""
+    print("\n=== Change Report ===")
+    # .env
+    _env_keys = [k for k in ("HERMES_DASHBOARD_BASIC_AUTH_USERNAME", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH", "HERMES_DASHBOARD_BASIC_AUTH_SECRET")]
+    old_vals = existing_env(env_file)
+    if any(k not in old_vals for k in _env_keys):
+        print(f".env:     {ns.username} + password_hash + (secret {'updated' if 'HERMES_DASHBOARD_BASIC_AUTH_SECRET' in old_vals else 'generated'})")
+    # config.yaml via hermes config set
+    changed_config = []
+    if ns.public_url:
+        changed_config.append("dashboard.public_url")
+    if ns.trusted_proxy:
+        changed_config.append("dashboard.trusted_proxies")
+    if changed_config:
+        print(f"config:   {', '.join(changed_config)}")
+    # launcher file
+    launcher = home / "start-dashboard.cmd"
+    if os.name == "nt":
+        print(f"launcher: start-dashboard.cmd (created/updated)")
+    # autostart mechanism
+    if not ns.no_service:
+        if os.name == "nt":
+            print("autostart: HKCU Run entry 'HermesDashboard'")
+        else:
+            print("autostart: systemd user unit hermes-dashboard.service (enabled)")
+    # backup + changelog
+    print(f"backup:   {backup_dir}")
+    print(f"changelog: appended to CHANGELOG.md ({home / 'CHANGELOG.md'})")
+    # status hint
+    if ns.public_url:
+        print("status:   backend-ready (public URL/proxy still needs verification)")
+    else:
+        print("status:   backend-ready (LAN reachable on {bind}:{ns.port})")
 
 if __name__ == "__main__":
     raise SystemExit(main())

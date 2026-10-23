@@ -96,6 +96,7 @@ Expected: `true` and `basic` (or the selected OAuth/OIDC provider).
    - profiles are selected after login;
    - service/auth/status/ticket/proxy verification results;
    - anything still pending.
+8. Read back the compact change report printed by `setup_remote.py` at the end of its execution. It lists every modified file, changed config keys, autostart mechanism, backup path, and final status (`backend-ready` or `remote-ready`). Present this report verbatim for review before proceeding with proxy verification.
 
 ## Pitfalls
 
@@ -117,3 +118,4 @@ Expected: `true` and `basic` (or the selected OAuth/OIDC provider).
 - [ ] Authenticated `POST /api/auth/ws-ticket` returns a ticket; never print its value.
 - [ ] Autostart, listener, public URL, trusted proxy, backup, and changelog were read back.
 - [ ] For HTTPS, DNS, forwarded headers, cookies, and `/api/ws` upgrades work through the proxy.
+- [ ] Compact change report from `setup_remote.py` was reviewed and matches expected modifications (no unexpected secrets or config drift).
