@@ -13,6 +13,34 @@ from pathlib import Path
 def run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(args, text=True, check=True, capture_output=True)
 
+
+def import_password_hasher(hermes: str, home: Path):
+    """Import the bundled hasher, re-execing in Hermes' venv when necessary."""
+    source_candidates = [
+        Path.home() / ".hermes" / "hermes-agent",
+        home / "hermes-agent",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "hermes" / "hermes-agent",
+    ]
+    for source_root in source_candidates:
+        basic_plugin = source_root / "plugins" / "dashboard_auth" / "basic"
+        if (basic_plugin / "__init__.py").exists() or basic_plugin.with_suffix(".py").exists():
+            sys.path.insert(0, str(source_root))
+            break
+    try:
+        from plugins.dashboard_auth.basic import hash_password
+        return hash_password
+    except ModuleNotFoundError as exc:
+        runtime_python = Path(hermes).with_name("python.exe" if os.name == "nt" else "python")
+        if (
+            os.environ.get("HERMES_REMOTE_SETUP_REEXEC") != "1"
+            and runtime_python.exists()
+            and runtime_python.resolve() != Path(sys.executable).resolve()
+        ):
+            env = os.environ.copy()
+            env["HERMES_REMOTE_SETUP_REEXEC"] = "1"
+            os.execve(runtime_python, [str(runtime_python), *sys.argv], env)
+        raise RuntimeError(f"Cannot import Hermes password hasher: {exc}") from exc
+
 def replace_env(path: Path, updates: dict[str, str]) -> None:
     lines = path.read_text().splitlines() if path.exists() else []
     out, seen = [], set()
@@ -59,27 +87,23 @@ def main() -> int:
     if not hermes:
         print("Hermes was not found in PATH.", file=sys.stderr)
         return 2
+    # The auth plugin imports Hermes runtime dependencies. Re-exec through the
+    # interpreter beside the resolved Hermes launcher before prompting, so a
+    # standalone/system Python cannot make the user enter the password twice.
+    hermes_dir = Path(hermes).resolve().parent
+    venv_python = hermes_dir / ("python.exe" if os.name == "nt" else "python")
+    if venv_python.exists() and Path(sys.executable).resolve() != venv_python.resolve():
+        os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+    home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
+    try:
+        hash_password = import_password_hasher(hermes, home)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     pw1 = getpass.getpass("Dashboard password: ")
     pw2 = getpass.getpass("Repeat password: ")
     if not pw1 or pw1 != pw2 or len(pw1) < 12:
         print("Passwords must match and contain at least 12 characters.", file=sys.stderr)
-        return 2
-    home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
-    # Source installs keep the bundled auth plugin under the machine-level
-    # Hermes checkout; add it without assuming the system Python has Hermes
-    # installed as a site package.
-    source_candidates = [
-        Path.home() / ".hermes" / "hermes-agent",
-        home / "hermes-agent",
-    ]
-    for source_root in source_candidates:
-        if (source_root / "plugins" / "dashboard_auth" / "basic.py").exists():
-            sys.path.insert(0, str(source_root))
-            break
-    try:
-        from plugins.dashboard_auth.basic import hash_password
-    except Exception as exc:
-        print(f"Cannot import Hermes password hasher: {exc}", file=sys.stderr)
         return 2
     env_file = home / ".env"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -100,7 +124,32 @@ def main() -> int:
     if ns.trusted_proxy:
         run(hermes, "config", "set", "dashboard.trusted_proxies", f'["{ns.trusted_proxy}"]')
     bind = "127.0.0.1" if ns.mode == "https-local" else "0.0.0.0"
-    if not ns.no_service:
+    if not ns.no_service and os.name == "nt":
+        launcher = home / "start-dashboard.cmd"
+        if launcher.exists():
+            shutil.copy2(launcher, backup_dir / launcher.name)
+        launcher.write_text(
+            "@echo off\r\n"
+            f'"{hermes}" dashboard --host {bind} --port {ns.port} --no-open\r\n'
+        )
+        # HKCU Run is the native per-user equivalent of a systemd user unit:
+        # no administrator rights or stored Windows account password required.
+        run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+        previous = subprocess.run(
+            ["reg.exe", "query", run_key, "/v", "HermesDashboard"],
+            text=True, capture_output=True,
+        )
+        if previous.returncode == 0:
+            (backup_dir / "HermesDashboard-HKCU-Run.txt").write_text(previous.stdout)
+        run("reg.exe", "add", run_key, "/v", "HermesDashboard", "/t", "REG_SZ",
+            "/d", str(launcher), "/f")
+        subprocess.Popen(
+            ["cmd.exe", "/c", str(launcher)],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    elif not ns.no_service:
         unit_dir = Path.home() / ".config" / "systemd" / "user"
         unit_dir.mkdir(parents=True, exist_ok=True)
         unit = unit_dir / "hermes-dashboard.service"
